@@ -1,10 +1,18 @@
 [project]
 name = "asset-management-system"
 version = "0.1.0"
-description = "Add your description here"
+description = "Buguard Asset Management System - AI Applications Track"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi==0.110.0",
+    "uvicorn==0.28.0",
+    "sqlalchemy==2.0.28",
     "psycopg2-binary>=2.9.12",
     "sqlacodegen-v2>=0.1.4",
+    "pydantic==2.6.4",
+    "pydantic-settings==2.2.1",
+    "langchain==0.1.12",
+    "langchain-community==0.0.28",
+    "python-dotenv==1.0.1",
 ]
