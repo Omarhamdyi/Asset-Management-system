@@ -6,7 +6,7 @@ from typing import Any
 from app.database import get_db
 from app.models import Assets
 from app.services.ai_service import translate_nl_query_to_filters
-from datetime import datetime
+from datetime import datetime, timedelta
 
 router = APIRouter(prefix="/analyze", tags=["AI Analysis"])
 
@@ -36,18 +36,42 @@ def natural_language_query(payload: QueryRequest, db: Session = Depends(get_db))
                 (Assets.tags.any(env_keyword))
             )
             
+        if filters.tag:
+            query_builder = query_builder.filter(Assets.tags.any(filters.tag.lower()))
+
         if filters.is_expired is True:
-            current_time = datetime.now()
-            query_builder = query_builder.filter(Assets.asset_type == "certificate")
+            current_time = datetime.utcnow()
+            query_builder = query_builder.filter(
+                Assets.asset_type == "certificate",
+                Assets.certificate_expires_at < current_time
+            )
+
+        if filters.first_seen_within_days:
+            time_threshold = datetime.utcnow() - timedelta(days=filters.first_seen_within_days)
+            query_builder = query_builder.filter(Assets.first_seen >= time_threshold)
+
+        if filters.last_seen_within_days:
+            time_threshold = datetime.utcnow() - timedelta(days=filters.last_seen_within_days)
+            query_builder = query_builder.filter(Assets.last_seen >= time_threshold)
+
+        if filters.metadata_port:
+            query_builder = query_builder.filter(Assets.metadata_['port'].as_integer() == filters.metadata_port)
             
-            if hasattr(Assets, 'certificate_expires_at'):
-                query_builder = query_builder.filter(Assets.certificate_expires_at < current_time)
-            else:
-                current_date_str = current_time.strftime("%Y-%m-%d")
-                query_builder = query_builder.filter(
-                    Assets.metadata_['expiry_date'].as_string() < current_date_str
-                )
-        results = query_builder.limit(50).all()
+        if filters.metadata_banner_contains:
+            query_builder = query_builder.filter(Assets.metadata_['banner'].as_string().ilike(f"%{filters.metadata_banner_contains}%"))
+
+        if filters.order_by:
+            column = getattr(Assets, filters.order_by, None)
+            if column:
+                if filters.order_dir and filters.order_dir.lower() == "desc":
+                    query_builder = query_builder.order_by(column.desc())
+                else:
+                    query_builder = query_builder.order_by(column.asc())
+
+        result_limit = filters.limit if filters.limit is not None else 50
+        query_builder = query_builder.limit(result_limit)
+        
+        results = query_builder.all()
         
         return {
             "user_query": payload.query,
