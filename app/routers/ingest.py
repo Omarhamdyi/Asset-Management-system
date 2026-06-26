@@ -7,6 +7,7 @@ from typing import List
 from app.database import get_db
 from app.models import Assets, Organizations, AssetRelationships  
 from app.schemas import AssetIngestSchema
+from datetime import datetime
 
 router = APIRouter(prefix="/ingest", tags=["Data Ingestion"])
 
@@ -51,10 +52,29 @@ def bulk_import(assets: List[AssetIngestSchema], db: Session = Depends(get_db)):
                 
                 existing_asset.tags = list(set(existing_asset.tags + asset_data.tags))
                 existing_asset.metadata_ = {**existing_asset.metadata_, **asset_data.metadata}
+                
+                if existing_asset.asset_type == "certificate" and asset_data.metadata:
+                    expiry_date_str = asset_data.metadata.get("expiry_date")
+                    if expiry_date_str:
+                        try:
+                            existing_asset.certificate_expires_at = datetime.strptime(expiry_date_str, "%Y-%m-%d")
+                        except ValueError:
+                            pass
+                
+            
                 existing_asset.updated_at = datetime.utcnow()
                 updated_count += 1
                 processed_assets.append(existing_asset)
             else:
+                cert_expiry = None
+                if asset_type_clean == "certificate" and asset_data.metadata:
+                    expiry_date_str = asset_data.metadata.get("expiry_date")
+                    if expiry_date_str:
+                        try:
+                            cert_expiry = datetime.strptime(expiry_date_str, "%Y-%m-%d")
+                        except ValueError:
+                            pass 
+
                 new_asset = Assets(
                     id=asset_uuid,
                     organization_id=DEFAULT_ORG_ID,
@@ -65,6 +85,7 @@ def bulk_import(assets: List[AssetIngestSchema], db: Session = Depends(get_db)):
                     source=source_clean,
                     tags=asset_data.tags,
                     metadata_={**asset_data.metadata},
+                    certificate_expires_at=cert_expiry, 
                     first_seen=datetime.utcnow(),
                     last_seen=datetime.utcnow(),
                     created_at=datetime.utcnow(),
