@@ -16,9 +16,11 @@
    - [Automated Enrichment & Categorization](#43-automated-enrichment--categorization)
    - [Natural-Language Report Generation](#44-natural-language-report-generation)
 5. [Data Modeling](#5-data-modeling)
-   - [Asset Model](#51-asset-model)
-   - [Relationships Graph](#52-relationships-graph)
-   - [Database Schema](#53-database-schema)
+   - [Organizations Model](#51-organizations-model)
+   - [Asset Model](#52-asset-model)
+   - [Relationships Graph](#53-relationships-graph)
+   - [Asset Import Batches Model](#54-asset-import-batches-model)
+   - [Database Schema Overview](#55-database-schema-overview)
 6. [Design Decisions & Assumptions](#6-design-decisions--assumptions)
 7. [Future Improvements](#7-future-improvements)
 
@@ -384,38 +386,125 @@ Generates structured markdown security briefs detailing the overall risk surface
 
 ### 5.1 Asset Model
 
-| Field | Type | Description |
+The core table storing every discovered infrastructure target, linked to its owning organization.
+
+| Field | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK, default `gen_random_uuid()` | Unique, stable asset identifier |
+| `organization_id` | UUID | NOT NULL, FK → `organizations.id` CASCADE | Owning tenant |
+| `asset_type` | enum | NOT NULL | `domain` · `subdomain` · `ip_address` · `service` · `certificate` · `technology` |
+| `value` | Text | NOT NULL, non-empty | Raw canonical value e.g. `api.example.com`, `203.0.113.10`, `443/tcp` |
+| `normalized_value` | Text | NOT NULL, non-empty, UNIQUE per org+type | Lowercased/cleaned value used for deduplication |
+| `status` | enum | NOT NULL, default `active` | `active` · `stale` · `archived` |
+| `source` | enum | NOT NULL | `import` · `scan` · `manual` |
+| `tags` | Text[] | NOT NULL, default `{}` | Free-form labels for filtering and grouping |
+| `metadata` | JSONB | NOT NULL, default `{}` | Type-specific fields: cert issuer/expiry, tech version, AI-enriched environment tags |
+| `first_seen` | Timestamp (tz) | NOT NULL, default `now()` | Set once on creation, never updated |
+| `last_seen` | Timestamp (tz) | NOT NULL, default `now()` | Refreshed on every re-sighting |
+| `certificate_expires_at` | Timestamp (tz) | Nullable | Expiry timestamp; populated only for `certificate` assets |
+| `created_at` | Timestamp (tz) | NOT NULL, default `now()` | Row creation timestamp |
+| `updated_at` | Timestamp (tz) | NOT NULL, default `now()` | Row last-update timestamp |
+
+**Indexes:**
+
+| Index | Columns | Purpose |
 |---|---|---|
-| `id` | UUID | Unique, stable identifier |
-| `type` | enum | `domain`, `subdomain`, `ip_address`, `service`, `certificate`, `technology` |
-| `value` | string | Canonical value e.g. `api.example.com`, `203.0.113.10`, `443/tcp` |
-| `status` | enum | `active` · `stale` · `archived` |
-| `first_seen` | datetime | Set once on creation, never updated |
-| `last_seen` | datetime | Updated on every re-sighting |
-| `source` | enum | `import` · `scan` · `manual` |
-| `tags` | list\<string\> | Free-form labels for filtering |
-| `metadata` | JSON | Type-specific fields: cert issuer/expiry, banner, tech version |
+| `assets_identity_unique` | `organization_id`, `asset_type`, `normalized_value` | Deduplication — prevents duplicate assets per org |
+| `idx_assets_organization_type_status` | `organization_id`, `asset_type`, `status` | Fast filtered lookups by type and lifecycle |
+| `idx_assets_organization_normalized_value` | `organization_id`, `normalized_value` | Efficient value-based lookups |
+| `idx_assets_certificate_expires_at` | `organization_id`, `certificate_expires_at` | Certificate expiry monitoring queries |
+| `idx_assets_last_seen` | `organization_id`, `last_seen` | Stale asset detection |
+| `idx_assets_tags_gin` | `tags` | GIN index for array containment queries on tags |
+| `idx_assets_metadata_gin` | `metadata` | GIN index for JSONB key/value searches |
+| `idx_assets_value_trgm` | `value` | Trigram index for fuzzy/partial text search on raw value |
+
 
 ### 5.2 Relationships Graph
 
-| Relationship | Direction | Type |
-|---|---|---|
-| Subdomain → Domain | one-way | `subdomain_to_domain` |
-| Service → IP Address | one-way | `service_to_ip_address` |
-| IP Address ↔ Subdomain | bidirectional | `ip_address_to_subdomain` · `subdomain_to_ip_address` |
-| Certificate → Domain | one-way | `certificate_to_domain` |
-| Certificate → Subdomain | one-way | `certificate_to_subdomain` |
-| Technology → Subdomain | one-way | `technology_to_subdomain` |
-| Technology → Service | one-way | `technology_to_service` |
+A directed graph table mapping typed edges between assets, with DB-level constraints enforcing only valid source/target type combinations.
 
-### 5.3 Database Schema
+| Field | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK, default `gen_random_uuid()` | Unique edge identifier |
+| `organization_id` | UUID | NOT NULL, FK → `organizations.id` CASCADE | Scopes the edge to a tenant |
+| `source_asset_id` | UUID | NOT NULL, FK → `assets.id` CASCADE | The originating asset |
+| `source_asset_type` | enum | NOT NULL | Type of the source asset |
+| `target_asset_id` | UUID | NOT NULL, FK → `assets.id` CASCADE | The destination asset |
+| `target_asset_type` | enum | NOT NULL | Type of the target asset |
+| `relationship_type` | enum | NOT NULL | One of the 8 valid edge types (see below) |
+| `metadata` | JSONB | NOT NULL, default `{}` | Optional edge-level attributes |
+| `first_seen` | Timestamp (tz) | NOT NULL, default `now()` | When this edge was first observed |
+| `last_seen` | Timestamp (tz) | NOT NULL, default `now()` | When this edge was last confirmed |
+| `created_at` | Timestamp (tz) | NOT NULL, default `now()` | Row creation timestamp |
+| `updated_at` | Timestamp (tz) | NOT NULL, default `now()` | Row last-update timestamp |
+
+**Permitted relationship types** (enforced via a DB `CHECK` constraint):
+
+| Relationship | Source Type | Target Type | Direction |
+|---|---|---|---|
+| `subdomain_to_domain` | `subdomain` | `domain` | one-way |
+| `subdomain_to_ip_address` | `subdomain` | `ip_address` | one-way |
+| `service_to_ip_address` | `service` | `ip_address` | one-way |
+| `ip_address_to_subdomain` | `ip_address` | `subdomain` | one-way |
+| `certificate_to_domain` | `certificate` | `domain` | one-way |
+| `certificate_to_subdomain` | `certificate` | `subdomain` | one-way |
+| `technology_to_subdomain` | `technology` | `subdomain` | one-way |
+| `technology_to_service` | `technology` | `service` | one-way |
+
+> **Note:** IP ↔ Subdomain is modelled as two separate directed edges (`ip_address_to_subdomain` + `subdomain_to_ip_address`), making the bidirectional link explicit and queryable in both directions. Self-referential edges (`source_asset_id = target_asset_id`) are also blocked at the DB level.
+
+**Indexes:**
+
+| Index | Columns | Purpose |
+|---|---|---|
+| `asset_relationships_unique` | `organization_id`, `source_asset_id`, `target_asset_id`, `relationship_type` | Prevents duplicate edges |
+| `idx_asset_relationships_source` | `organization_id`, `source_asset_id` | Fast outbound edge traversal |
+| `idx_asset_relationships_target` | `organization_id`, `target_asset_id` | Fast inbound edge traversal |
+| `idx_asset_relationships_type` | `organization_id`, `relationship_type` | Filter edges by type across an org |
+
+
+### 5.3 Organizations Model
+
+Every asset and import batch is scoped to a tenant organization, enforcing strict data isolation across clients.
+
+| Field | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK, default `gen_random_uuid()` | Unique tenant identifier |
+| `slug` | Text | NOT NULL, UNIQUE | URL-safe identifier for the org |
+| `name` | Text | NOT NULL | Human-readable display name |
+| `created_at` | Timestamp (tz) | NOT NULL, default `now()` | Record creation time |
+| `updated_at` | Timestamp (tz) | NOT NULL, default `now()` | Last modification time |
+
+
+### 5.4 Asset Import Batches Model
+
+Tracks each bulk ingestion job end-to-end, storing progress counters and per-record error payloads to support audit trails and failure diagnostics.
+
+| Field | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | UUID | PK, default `gen_random_uuid()` | Unique batch identifier |
+| `organization_id` | UUID | NOT NULL, FK → `organizations.id` CASCADE | Owning tenant |
+| `source_name` | Text | NOT NULL | Name/label of the originating data source |
+| `status` | enum | NOT NULL, default `pending` | `pending` · `processing` · `completed` · `completed_with_errors` · `failed` |
+| `total_records` | Integer | NOT NULL ≥ 0, default `0` | Total records submitted in the batch |
+| `successful_records` | Integer | NOT NULL ≥ 0, default `0` | Records ingested without error |
+| `failed_records` | Integer | NOT NULL ≥ 0, default `0` | Records that failed validation or insertion |
+| `record_errors` | JSONB | NOT NULL, default `[]` | Array of per-record error details |
+| `relationship_errors` | JSONB | NOT NULL, default `[]` | Array of relationship-level errors encountered during graph linking |
+| `source_checksum` | Text | Nullable | Hash of the source file/payload for idempotency checks |
+| `started_at` | Timestamp (tz) | NOT NULL, default `now()` | When batch processing began |
+| `completed_at` | Timestamp (tz) | Nullable | Set when the batch reaches a terminal status |
+| `created_at` | Timestamp (tz) | NOT NULL, default `now()` | Row creation timestamp |
+| `updated_at` | Timestamp (tz) | NOT NULL, default `now()` | Row last-update timestamp |
+
+### 5.5 Database Schema Overview
 
 DarkAtlas manages integrity and high-performance ingestion through a 4-table transactional layout built on SQLAlchemy:
 
-- **`organizations`** — Holds the primary client/tenant spaces.
-- **`assets`** — Houses individual targets (domains, certificates, services) linked explicitly to an organization.
-- **`asset_relationships`** — A directed graph table storing mapping keys (e.g., matching a service to its hosting IP).
-- **`asset_import_batches`** — Manages operational metrics and asynchronous batch status logs for analytical trackback.
+- **`organizations`** — Root tenant table; every other table cascades deletes from here, ensuring clean multi-tenant isolation.
+- **`assets`** — The core system of record for all discovered infrastructure targets, with GIN indexes on JSONB and array columns for fast AI-enrichment queries.
+- **`asset_relationships`** — A directed graph edge table with DB-enforced type constraints, preventing structurally invalid connections at the schema level.
+- **`asset_import_batches`** — Operational audit log for every bulk ingest job, capturing counters, error payloads, checksums, and lifecycle timestamps for full traceability.
 
 ---
 
@@ -455,4 +544,3 @@ DarkAtlas manages integrity and high-performance ingestion through a 4-table tra
 - **Agentic tool-use:** Elevate the linear LangChain analysis routers into a unified ReAct agent that loops and calls endpoints dynamically.
 - **Strict multi-tenant isolation:** Enforce row-level tenant security (RLS) policies within PostgreSQL to strictly ensure multi-tenant protection.
 - **Caching layer:** Introduce a Redis instance to cache repeated natural language queries where underlying asset tables haven't mutated.
-
