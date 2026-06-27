@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends
+from sqlalchemy import text 
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.routers import ingest 
@@ -17,8 +18,7 @@ def health_check():
 @app.get("/test-db")
 def test_db(db: Session = Depends(get_db)):
     try:
-
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         return {"status": "Database connection is successful!"}
     except Exception as e:
         return {"status": "Database connection failed", "error": str(e)}
