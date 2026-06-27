@@ -262,6 +262,53 @@ def analyze_assets_risk(assets_json: List[Dict[str, Any]]) -> RiskAssessment:
     chain = prompt | structured_llm
     return chain.invoke({"assets_data": json.dumps(assets_json, default=str)})
 
+# ---------------------------------------------------------------------------
+# Capability 3 — Automated Enrichment & Categorization
+# ---------------------------------------------------------------------------
+
+class AssetEnrichmentClassification(BaseModel):
+    reasoning: str = Field(..., description="Brief reasoning behind the environment and categorization choice.")
+    environment: str = Field(..., description="Must be exactly one of: prod, staging, dev.")
+    category: str = Field(..., description="The asset category, e.g., web_server, database, mail_server, load_balancer, api_endpoint, dns_record.")
+    criticality: str = Field(..., description="Inferred criticality: critical, high, medium, low.")
+    enriched_metadata: List[str] = Field(
+        default_factory=List, 
+        description="List of detected technologies, tools, or purposes from the asset name/metadata (e.g. ['aws', 'php', 'payment-gateway', 'kubernetes'])."
+    )
+
+def classify_and_enrich_asset_ai(asset_info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Calls the LLM to inspect a raw asset and decide its deployment environment,
+    asset category, and baseline security criticality.
+    """
+    llm = init_chat_model("command-a-plus-05-2026", temperature=0.0)
+
+    system_prompt = (
+        "You are an automated Attack Surface Intelligence engine.\n"
+        "Your task is to analyze a raw newly imported asset and classify its environment, category, and business criticality.\n\n"
+        "Classification Rules:\n"
+        "1. Environment: Inspect the asset value (e.g. subdomains/domains). Look for keywords like 'prod', 'live', 'api' -> prod. 'stage', 'stg', 'qa' -> staging. 'dev', 'local', 'test' -> dev. Default to 'prod' if unclear.\n"
+        "2. Category: Determine the role (e.g., if port 3306 or 'db' -> database, if 'mail' -> mail_server, if web port or domain -> web_server/api_endpoint).\n"
+        "3. Criticality:\n"
+        "   - 'critical' or 'high': for prod databases, payment gateways, active external APIs, main corporate domains.\n"
+        "   - 'medium': staging environments, internal tools, standard web profiles.\n"
+        "   - 'low': dev or test environments, archived/stale assets.\n\n"
+        "Strictly return output matching the requested schema."
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "Classify and enrich this asset data:\n\n{asset_data}")
+    ])
+
+    structured_llm = llm.with_structured_output(AssetEnrichmentClassification)
+    chain = prompt | structured_llm
+    
+    response = chain.invoke({"asset_data": json.dumps(asset_info)})
+    return response.dict()
+
+
+
 
 # ---------------------------------------------------------------------------
 # Capability 4 — Natural-language report generation

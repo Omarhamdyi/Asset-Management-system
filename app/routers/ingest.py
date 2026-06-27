@@ -1,5 +1,5 @@
 import uuid
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, Depends, status, HTTPException, BackgroundTasks 
 from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import List
@@ -7,13 +7,14 @@ from typing import List
 from app.database import get_db
 from app.models import Assets, Organizations, AssetRelationships, AssetImportBatches
 from app.schemas import AssetIngestSchema
+from app.services.ai_enrichment import run_automated_enrichment_pipeline
 
 router = APIRouter(prefix="/ingest", tags=["Data Ingestion"])
 
 NAMESPACE_BUGUARD = uuid.UUID('12345678-1234-5678-1234-567812345678')
 
 @router.post("/bulk", status_code=status.HTTP_201_CREATED)
-def bulk_import(assets: List[AssetIngestSchema], db: Session = Depends(get_db)):
+def bulk_import(assets: List[AssetIngestSchema], background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     inserted_count = 0
     updated_count = 0
     failed_count = 0
@@ -41,6 +42,7 @@ def bulk_import(assets: List[AssetIngestSchema], db: Session = Depends(get_db)):
     db.flush()
 
     processed_assets = []
+    newly_inserted_ids = []
 
     for index, asset_data in enumerate(assets):
         asset_savepoint = db.begin_nested()
@@ -127,6 +129,7 @@ def bulk_import(assets: List[AssetIngestSchema], db: Session = Depends(get_db)):
                 db.add(new_asset)
                 inserted_count += 1
                 processed_assets.append(new_asset)
+                newly_inserted_ids.append(new_asset.id)
 
             asset_savepoint.commit()  
 
@@ -241,10 +244,13 @@ def bulk_import(assets: List[AssetIngestSchema], db: Session = Depends(get_db)):
     batch_record.completed_at = datetime.utcnow()
 
     try:
-        db.commit()
+        db.commit() 
     except Exception as final_err:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Final database commit failed: {str(final_err)}")
+
+    for asset_id in newly_inserted_ids:
+        background_tasks.add_task(run_automated_enrichment_pipeline, asset_id=asset_id)
 
     return {
         "message": "Bulk import and relationships graphing completed successfully",
