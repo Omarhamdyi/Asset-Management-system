@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: buguard_postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: buguard_user
+      POSTGRES_PASSWORD: buguard_password
+      POSTGRES_DB: buguard_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buguard_user -d buguard_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    container_name: buguard_fastapi_app
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://buguard_user:buguard_password@db:5432/buguard_db
+    volumes:
+      - .:/app
+      - /app/.venv
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
