@@ -1,4 +1,5 @@
 # DarkAtlas — Asset Management System (AI Applications Track)
+![Alt text](./images/Repo_image.jpeg)
 
 ## Table of Contents
 
@@ -21,6 +22,7 @@
 6. [Design Decisions & Assumptions](#6-design-decisions--assumptions)
 7. [Future Improvements](#7-future-improvements)
 
+
 ---
 
 ## 1. Project Overview
@@ -39,10 +41,11 @@ D:\Asset_Management_System
 ├── .env.example          # Template for environment variables (API keys, DB credentials)
 ├── .gitignore            # Files and folders to ignore in Git (e.g., .venv, secrets)
 ├── .python-version       # Specifies the exact Python version used for the project
-├── pyproject.toml        # Project configuration and dependency management (using uv)
+├── Dockerfile            # Blueprint for building the application container image
 ├── README.md             # Project documentation and setup guide
+├── docker-compose.yaml   # Multi-container orchestration config (FastAPI app & PostgreSQL database)
+├── pyproject.toml        # Project configuration and dependency management (using uv)
 ├── uv.lock               # Locked dependency versions for reproducible environments
-├── .venv/                # Isolated local virtual environment directory
 ├── app/
 │   ├── __init__.py       # Initializes the app package
 │   ├── database.py       # SQLAlchemy engine and session configuration
@@ -59,6 +62,12 @@ D:\Asset_Management_System
 │       └── ai_enrichment.py # Background task management for automated asset categorization
 └── migrations/
     └── 001_add_subdomain_to_ip_address_relationship.sql  # SQL migration for relationship constraints
+└── images/
+    └── Capability1.PNG
+    └── Capability2.PNG
+    └── Capability3.PNG
+    └── Capability4.PNG
+    └── Repo_image.jpeg
 ```
 
 ---
@@ -272,6 +281,19 @@ Upon bulk ingestion, the asset is saved instantly to allow unblocked standard wo
 
 * Progressive Metadata Update: The background worker takes these AI-extracted fields and progressively updates the asset's metadata JSON column in the database. 
 
+**Monitoring AI Enrichment Logs**
+
+* Below is a preview of the asynchronous background worker progressively processing and enriching ingested assets in real-time.
+
+**How to view these logs live:**
+
+* You can monitor the automated classification pipeline either through the Docker Desktop GUI or by running the following command in your terminal:
+
+```json
+docker compose logs web -f
+```
+![Alt text](./images/logs.PNG)
+
 **Example input asset:**
 
 ```json
@@ -399,15 +421,32 @@ DarkAtlas manages integrity and high-performance ingestion through a 4-table tra
 
 ## 6. Design Decisions & Assumptions
 
-- **LLM Provider — Cohere (`command-a-plus-05-2026`):** Selected for its production-tier support for structured JSON generation, cost efficiency, and performance with large multi-column retrieval context limits.
+**Two-Stage Data Flow for Natural-Language Queries:**
 
-- **Filter-based query approach:** To protect against severe security risks associated with dynamically executing raw LLM-generated SQL strings on the live database, the system safely processes queries via LangChain to compile predictable application-level filters.
+- **Decision**: Used the LLM strictly as an "Intent Translator" to extract structured JSON filters, leaving the actual SQL execution to SQLAlchemy.
 
-- **Asynchronous enrichment architecture:** High-volume API endpoints must be non-blocking. The bulk ingestion payload saves raw structures immediately (`201 Created`), spawning background routines to inject metadata progressively without timing out the client.
+- **Rationale**: Prevents severe SQL Injection risks and high token costs caused by exposing raw database schemas or executing raw string-generated SQL directly. This ensures 100% type-safe, indexed queries.
 
-- **Hardcoded default organization:** To simplify out-of-the-box demo tests on newly initialized empty databases, any batch request referencing the default `00000000-0000-0000-0000-000000000000` UUID is safely processed.
 
-- **Immutable `first_seen`:** `first_seen` is permanently locked upon database insertion to serve as a reliable tracking point, while `last_seen` mutates on subsequent overlapping sight sweeps.
+**Asynchronous AI Enrichment (Non-blocking Ingest):**
+
+- **Decision**: Decoupled raw ingestion from LLM logic using FastAPI Background Tasks.
+
+- **Rationale**: Since LLM inference introduces high latency, the API instantly saves raw data via SQLAlchemy and returns a 201 Created response. This prevents network timeouts and keeps the system responsive while heavy AI processing runs in the background.
+
+**Sequential Background Processing (Rate-Limit Optimization):**
+
+- **Decision**: Designed the background worker to process ingested assets sequentially (one-by-one) inside a loop rather than in a single bulk prompt.
+
+- **Rationale**: This avoids hitting upstream LLM rate limits (RPM/TPM), prevents context window exhaustion, and allows progressive, real-time database metadata updates.
+
+**Data Ingestion Structure & Sources:**
+
+- **Assumed** that external infrastructure discovery tools or users will upload assets in bulk batches rather than single records. Additionally, it is assumed that every asset originates from one of three predefined channels, which is strictly enforced via an Enum configuration (import, scan, manual).
+
+**Metadata Schema Flexibility:**
+
+- **Assumed** that the enrichment categories generated by the LLM (e.g., environment types, security tags) will mutate over time. Storing this AI-enriched data inside a flexible PostgreSQL JSONB column (metadata) allows seamless schema evolution without requiring database migrations.
 
 ---
 
@@ -416,3 +455,4 @@ DarkAtlas manages integrity and high-performance ingestion through a 4-table tra
 - **Agentic tool-use:** Elevate the linear LangChain analysis routers into a unified ReAct agent that loops and calls endpoints dynamically.
 - **Strict multi-tenant isolation:** Enforce row-level tenant security (RLS) policies within PostgreSQL to strictly ensure multi-tenant protection.
 - **Caching layer:** Introduce a Redis instance to cache repeated natural language queries where underlying asset tables haven't mutated.
+
