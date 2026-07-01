@@ -1,5 +1,4 @@
-# DarkAtlas — Asset Management System (AI Applications Track)
-![Alt text](./images/Repo_image.jpeg)
+# Asset Management System
 
 ## Table of Contents
 
